@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Extractor PDF BanPopular</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <style>
+    :root {
+      --primary-color: #007bff;
+      --primary-hover: #0056b3;
+      --secondary-color: #6c757d;
+      --secondary-hover: #5a6268;
+      --background-color: #f8f9fa;
+      --font-color: #333;
+      --border-color: #dee2e6;
+      --header-bg: #e9ecef;
+      --white: #fff;
+      --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: var(--background-color);
+      color: var(--font-color);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .container {
+      background: var(--white);
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      width: 100%;
+      max-width: 900px;
+    }
+
+    h1 {
+      color: var(--primary-color);
+      margin-bottom: 20px;
+      text-align: center;
+      font-size: 2em;
+    }
+
+    .controls {
+      display: flex;
+      gap: 15px;
+      align-items: center;
+      margin-bottom: 25px;
+      flex-wrap: wrap;
+    }
+    
+    input[type="file"] {
+        flex-grow: 1;
+    }
+
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 5px;
+      color: var(--white);
+      background-color: var(--primary-color);
+      cursor: pointer;
+      font-size: 16px;
+      transition: background-color 0.3s ease;
+    }
+
+    button:hover:not(:disabled) {
+      background-color: var(--primary-hover);
+    }
+    
+    button#exportBtn {
+        background-color: var(--secondary-color);
+    }
+    
+    button#exportBtn:hover:not(:disabled) {
+        background-color: var(--secondary-hover);
+    }
+
+    button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+
+    table {
+      border-collapse: collapse;
+      margin-top: 20px;
+      width: 100%;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--header-bg);
+      font-weight: 600;
+    }
+
+    tbody tr:nth-child(even) {
+        background-color: #f2f2f2;
+    }
+    
+    tbody tr:hover {
+        background-color: #e9ecef;
+    }
+
+    td {
+      font-size: 14px;
+    }
+
+    .right {
+      text-align: right;
+      font-family: "Courier New", Courier, monospace;
+    }
+    
+    #resultsContainer {
+        overflow-x: auto;
+    }
+    
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1>Extractor PDF BanPopular</h1>
+    <div class="controls">
+      <input type="file" id="fileInput" accept="application/pdf" />
+      <button id="processBtn" disabled>Procesar PDF</button>
+      <button id="exportBtn" disabled>Exportar a CSV</button>
+    </div>
+
+    <div id="resultsContainer">
+      <p>Seleccione un archivo PDF para comenzar.</p>
+    </div>
+  </div>
+
+  <script>
+    const pdfjsLib = window['pdfjs-dist/build/pdf'];
+    if (pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    }
+
+    let currentFile = null;
+    let transactions = [];
+
+    const $ = id => document.getElementById(id);
+    const fileInput   = $('fileInput');
+    const processBtn  = $('processBtn');
+    const exportBtn   = $('exportBtn');
+    const results     = $('resultsContainer');
+
+    fileInput.addEventListener('change', e => {
+      currentFile = e.target.files[0] || null;
+      processBtn.disabled = !currentFile;
+    });
+    processBtn.addEventListener('click', processFile);
+    exportBtn .addEventListener('click', exportToCsv);
+
+    async function processFile() {
+      if (!currentFile || !pdfjsLib) return;
+      results.innerHTML = '<p>Procesando, por favor espere...</p>';
+      const arrayBuffer = await currentFile.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+      const year = await detectYear(pdf) || new Date().getFullYear();
+      transactions = await extractTransactions(pdf, year);
+
+      // ordenar por fecha real
+      transactions.sort((a,b) => {
+        const [da,ma,ya] = a.date.split('/').map(Number);
+        const [db,mb,yb] = b.date.split('/').map(Number);
+        return new Date(ya,ma-1,da) - new Date(yb,mb-1,db);
+      });
+
+      displayResults();
+      exportBtn.disabled = transactions.length === 0;
+    }
+
+    async function detectYear(pdf){
+      try{
+        const page = await pdf.getPage(1);
+        const content = await page.getTextContent();
+        const text = content.items.map(i=>i.str).join(' ');
+        const m = text.match(/\b(20\d{2})\b/);
+        return m ? parseInt(m[1],10) : null;
+      }catch{ return null; }
+    }
+
+    async function extractTransactions(pdf, year) {
+      const all = [];
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const content = await page.getTextContent();
+
+        // Tomamos texto con coordenadas
+        const items = content.items
+          .map(it => ({
+            str: it.str.trim(),
+            x: Math.round(it.transform[4]),
+            y: Math.round(it.transform[5])
+          }))
+          .filter(it => it.str !== '');
+
+        // ordenar por Y desc, luego X asc
+        items.sort((a,b) => b.y - a.y || a.x - b.x);
+
+        // agrupar en líneas por Y cercano
+        const lines = groupIntoLines(items, 6);
+
+        for (const line of lines) {
+          const trx = parseLine(line, year);
+          if (trx) all.push(trx);
+        }
+      }
+      return all;
+    }
+
+    function groupIntoLines(items, tol=6){
+      const lines = [];
+      let curr = [], currY = null;
+      for (const it of items){
+        if (currY===null || Math.abs(it.y - currY) > tol){
+          if (curr.length) lines.push(curr);
+          curr = [it];
+          currY = it.y;
+        } else {
+          curr.push(it);
+        }
+      }
+      if (curr.length) lines.push(curr);
+      // dentro de cada línea, ordenar por X asc
+      for (const ln of lines) ln.sort((a,b)=>a.x-b.x);
+      return lines;
+    }
+
+    function parseLine(line, year){
+      // ---------------- Fecha (mes, día) al inicio ----------------
+      const leftTokens = line.map(t=>t.str);
+      const firstIdx = findDateIndices(line);
+      if (!firstIdx) return null;
+      const {iMes, iDia, iHora} = firstIdx;
+      const mes = line[iMes].str, dia = line[iDia].str;
+      if (!isValidDate(mes, dia)) return null;
+      const fecha = `${dia.padStart(2,'0')}/${mes.padStart(2,'0')}/${year}`;
+
+      // ---------------- Montos (derecha) ----------------
+      const {debito, credito, saldo, amountStartX} = getRightAmounts(line);
+      if (debito===null || credito===null || saldo===null) return null;
+
+      // ---------------- Segmento intermedio: oficina + tipo + doc ----------------
+      // Tomamos los tokens entre la hora y el inicio de montos
+      const midTokens = line.filter(t => t.x > line[iHora].x && t.x < amountStartX).map(t=>t.str);
+
+      // Oficina: primeros tokens sin punto ni dígitos
+      let k = 0;
+      while (k < midTokens.length && !/[.\d]/.test(midTokens[k])) k++;
+      const oficinaTokens = midTokens.slice(0, k);
+      const restAfterOffice = midTokens.slice(k);
+
+      // Documento: primer token alfanumérico (letras y dígitos). Si le sigue un numérico puro grande, lo anexamos.
+      let docIdx = restAfterOffice.findIndex(t => /[A-Za-z]/.test(t) && /\d/.test(t));
+      let documento = "";
+      if (docIdx !== -1){
+        documento = restAfterOffice[docIdx];
+        if (restAfterOffice[docIdx+1] && /^\d{3,}$/.test(restAfterOffice[docIdx+1]))
+          documento += " " + restAfterOffice[docIdx+1];
+      }
+      // Tipo: lo que hay entre oficina y documento
+      const tipoTokens = (docIdx === -1) ? restAfterOffice : restAfterOffice.slice(0, docIdx);
+      const detalle = `${tipoTokens.join(' ')} ${documento} ${oficinaTokens.join(' ')}`.replace(/\s+/g,' ').trim();
+
+      // Movimiento = Crédito – Débito
+      const movimiento = +(credito - debito);
+
+      return {
+        date: fecha,
+        detail: detalle,
+        movement: movimiento,
+        balance: saldo
+      };
+    }
+
+    function findDateIndices(line){
+      // buscamos dos tokens de 2 dígitos seguidos y luego hora (3-4 dígitos)
+      for (let i=0;i<Math.min(line.length-2,8);i++){
+        if (/^\d{2}$/.test(line[i].str) && /^\d{2}$/.test(line[i+1].str)){
+          // hora siguiente (3 o 4 dígitos)
+          let h = i+2;
+          if (h < line.length && /^\d{3,4}$/.test(line[h].str)){
+            return {iMes:i, iDia:i+1, iHora:h};
+          }
+        }
+      }
+      return null;
+    }
+
+    function getRightAmounts(line){
+      // umbral para tomar el bloque derecho
+      const minX = Math.min(...line.map(t=>t.x));
+      const maxX = Math.max(...line.map(t=>t.x));
+      const threshold = minX + 0.55*(maxX-minX);
+
+      const rightNums = line
+        .filter(t => t.x >= threshold && /^[0-9.,]+$/.test(t.str))
+        .sort((a,b)=>a.x-b.x);
+
+      // Tomamos los 6 últimos tokens de la derecha (int,dec,int,dec,int,dec)
+      const last6 = rightNums.slice(-6);
+      if (last6.length !== 6) return {debito:null, credito:null, saldo:null, amountStartX:threshold};
+
+      const deb = joinNumber(last6[0]?.str, last6[1]?.str);
+      const cre = joinNumber(last6[2]?.str, last6[3]?.str);
+      const sal = joinNumber(last6[4]?.str, last6[5]?.str);
+
+      return {debito:deb, credito:cre, saldo:sal, amountStartX: last6[0].x};
+    }
+
+    function joinNumber(intPart, decPart){
+      if (!intPart) return 0;
+      const cleanInt = String(intPart).replace(/[^\d]/g,'');
+      const cleanDec = String(decPart ?? '00').replace(/[^\d]/g,'').padStart(2,'0').slice(0,2);
+      const n = Number(`${cleanInt}.${cleanDec}`);
+      return isNaN(n) ? 0 : n;
+    }
+
+    function isValidDate(mes, dia){
+      const m = parseInt(mes,10), d = parseInt(dia,10);
+      return m>=1 && m<=12 && d>=1 && d<=31;
+    }
+
+    function displayResults(){
+      if (!transactions.length){
+        results.innerHTML = '<p>No se encontraron transacciones en el documento.</p>';
+        return;
+      }
+      results.innerHTML = `
+        <table>
+          <thead>
+            <tr><th>Fecha</th><th>Detalle</th><th class="right">Movimiento</th><th class="right">Saldo</th></tr>
+          </thead>
+          <tbody>
+            ${transactions.map(t=>`
+              <tr>
+                <td>${t.date}</td>
+                <td>${t.detail}</td>
+                <td class="right">${t.movement.toLocaleString('es-CO',{style: 'currency', currency: 'COP'})}</td>
+                <td class="right">${t.balance.toLocaleString('es-CO',{style: 'currency', currency: 'COP'})}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function exportToCsv(){
+      if (!transactions.length) return;
+      const header = 'Fecha|Detalle|Movimiento|Saldo';
+      const rows = transactions.map(t => {
+        const mov = t.movement.toFixed(2).replace('.', ',');
+        const sal = t.balance.toFixed(2).replace('.', ',');
+        const det = `"${t.detail.replace(/"/g,'""')}"`;
+        return [t.date, det, mov, sal].join('|');
+      });
+      const csv = [header, ...rows].join('\n');
+      const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `extracto_bancario_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }
+  </script>
+</body>
+</html>
